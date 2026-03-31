@@ -118,7 +118,6 @@ class BinanceDataService {
       // Funding Rate
       const funding = fundingTk ? +fundingTk.lastFundingRate : null;
 
-      const refPrice = spotPrice || perpPrice;
       return {
         symbol: sym,
         spotPrice,
@@ -126,11 +125,11 @@ class BinanceDataService {
         volume,
         oi,
         funding,
-        price5mAgo:  price5mAgo  ?? refPrice,
-        price1hAgo:  price1hAgo  ?? refPrice,
+        price5mAgo,
+        price1hAgo,
         oi5mAgo,
         oi1hAgo,
-        volumeAvg:   volumeAvg || volume || 1,
+        volumeAvg:   volumeAvg || null,
         timestamp:   Date.now(),
       };
     } catch (e) {

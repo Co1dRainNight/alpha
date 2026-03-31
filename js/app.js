@@ -1,5 +1,5 @@
 /**
- * 主应用 — 状态管理、异步主循环、事件绑定
+ * 主应用 v2 — 视图模式、修正信号统计、数据有效性守卫
  */
 
 const App = {
@@ -10,7 +10,7 @@ const App = {
     filteredRows: [],
     search: '',
     signalFilter: 'all',
-    priorityOnly: false,
+    viewMode: 'all',
     sortBy: 'score',
     running: false,
     intervalId: null,
@@ -20,18 +20,17 @@ const App = {
     nextFetchTime: null,
     countdownId: null,
     useMock: new URLSearchParams(window.location.search).has('mock'),
+    logFilterSymbol: '',
+    logFilterSignal: '',
   },
 
   async init() {
-    if (this.state.useMock) {
-      this.dataService = new MockDataService();
-    } else {
-      this.dataService = new BinanceDataService();
-    }
+    this.dataService = this.state.useMock
+      ? new MockDataService()
+      : new BinanceDataService();
     this.logger = new SignalLogger();
     UI.init();
     this._bindEvents();
-
     window.__setFetchStatus = (msg) => UI.setFetchStatus(msg);
 
     await this._tick();
@@ -46,16 +45,13 @@ const App = {
     UI.showLoading(true);
 
     try {
-      let rawAll;
-      if (this.state.useMock) {
-        rawAll = this.dataService.fetchAll();
-      } else {
-        rawAll = await this.dataService.fetchAll();
-      }
+      const rawAll = this.state.useMock
+        ? this.dataService.fetchAll()
+        : await this.dataService.fetchAll();
 
       this.state.allMetrics = [];
       for (const raw of rawAll) {
-        if (!raw || (raw.spotPrice === null && raw.perpPrice === null)) continue;
+        if (!raw) continue;
         const coinCfg = COIN_POOL.find(c => c.symbol === raw.symbol);
         if (!coinCfg) continue;
 
@@ -89,6 +85,29 @@ const App = {
   _applyFilters() {
     let rows = [...this.state.allMetrics];
 
+    switch (this.state.viewMode) {
+      case 'active':
+        rows = rows.filter(r => this._hasCoreSignal(r));
+        break;
+      case 'priority':
+        rows = rows.filter(r => {
+          const cfg = COIN_POOL.find(c => c.symbol === r.symbol);
+          return cfg?.isPriority;
+        });
+        break;
+      case 'top20':
+        rows.sort((a, b) => b.score - a.score);
+        rows = rows.slice(0, 20);
+        break;
+      case 'top50':
+        rows.sort((a, b) => b.score - a.score);
+        rows = rows.slice(0, 50);
+        break;
+      case 'dataWarn':
+        rows = rows.filter(r => !r.validity || r.validity.completeness < 0.6);
+        break;
+    }
+
     if (this.state.search) {
       const q = this.state.search.toUpperCase();
       rows = rows.filter(r => r.symbol.includes(q));
@@ -100,17 +119,12 @@ const App = {
       );
     }
 
-    if (this.state.priorityOnly) {
-      const ps = new Set(COIN_POOL.filter(c => c.isPriority).map(c => c.symbol));
-      rows = rows.filter(r => ps.has(r.symbol));
-    }
-
     rows.sort((a, b) => {
       switch (this.state.sortBy) {
         case 'score':    return b.score - a.score;
-        case 'change5m': return Math.abs(b.spot5mChange) - Math.abs(a.spot5mChange);
-        case 'change1h': return Math.abs(b.spot1hChange) - Math.abs(a.spot1hChange);
-        case 'volume':   return b.volumeRatio - a.volumeRatio;
+        case 'change5m': return Math.abs(b.spot5mChange||0) - Math.abs(a.spot5mChange||0);
+        case 'change1h': return Math.abs(b.spot1hChange||0) - Math.abs(a.spot1hChange||0);
+        case 'volume':   return (b.volumeRatio||0) - (a.volumeRatio||0);
         case 'oi':       return Math.abs(b.oiChange5m||0) - Math.abs(a.oiChange5m||0);
         case 'symbol':   return a.symbol.localeCompare(b.symbol);
         default:         return b.score - a.score;
@@ -120,25 +134,39 @@ const App = {
     this.state.filteredRows = rows;
   },
 
+  _hasCoreSignal(metrics) {
+    return metrics.signals && metrics.signals.some(s => CORE_SIGNAL_KEYS.has(s.key));
+  },
+
   _render() {
-    const activeSignals = this.state.allMetrics
-      .reduce((sum, m) => sum + (m.signals && m.signals.length > 0 ? 1 : 0), 0);
+    const coreSignalCount = this.state.allMetrics
+      .filter(m => this._hasCoreSignal(m)).length;
+    const dataWarnCount = this.state.allMetrics
+      .filter(m => !m.validity || m.validity.completeness < 0.6).length;
     const priorityCoins = COIN_POOL.filter(c => c.isPriority).length;
     const loadedCoins = this.state.allMetrics.length;
-    const timeStr = this.state.lastFetchTime
-      ? new Date(this.state.lastFetchTime).toLocaleTimeString()
-      : '—';
 
     UI.renderStats({
       totalCoins: loadedCoins + '/' + COIN_POOL.length,
-      activeSignals,
+      activeSignals: coreSignalCount,
       priorityCoins,
-      lastUpdate: timeStr,
+      dataWarnCount,
+      lastUpdate: this.state.lastFetchTime
+        ? new Date(this.state.lastFetchTime).toLocaleTimeString() : '—',
     });
 
     UI.renderTable(this.state.filteredRows);
-    UI.renderLogPanel(this.logger.getRecent(100));
+    this._renderLogPanel();
     UI.setDataSource(this.state.useMock ? 'Mock' : 'Live');
+  },
+
+  _renderLogPanel() {
+    const logs = this.logger.getFiltered({
+      symbol:    this.state.logFilterSymbol || undefined,
+      signalKey: this.state.logFilterSignal || undefined,
+      limit: 100,
+    });
+    UI.renderLogPanel(logs);
   },
 
   _bindEvents() {
@@ -154,15 +182,18 @@ const App = {
       UI.renderTable(this.state.filteredRows);
     });
 
-    UI.els.priorityToggle.addEventListener('click', () => {
-      this.state.priorityOnly = !this.state.priorityOnly;
-      UI.els.priorityToggle.classList.toggle('active', this.state.priorityOnly);
+    UI.els.sortSelect.addEventListener('change', (e) => {
+      this.state.sortBy = e.target.value;
       this._applyFilters();
       UI.renderTable(this.state.filteredRows);
     });
 
-    UI.els.sortSelect.addEventListener('change', (e) => {
-      this.state.sortBy = e.target.value;
+    document.getElementById('view-mode-bar').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-view]');
+      if (!btn) return;
+      this.state.viewMode = btn.dataset.view;
+      document.querySelectorAll('#view-mode-bar .vm-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
       this._applyFilters();
       UI.renderTable(this.state.filteredRows);
     });
@@ -177,6 +208,17 @@ const App = {
     UI.els.detailClose.addEventListener('click', () => UI.hideDetail());
     UI.els.overlay.addEventListener('click', () => UI.hideDetail());
     UI.els.logToggle.addEventListener('click', () => UI.toggleLogPanel());
+
+    const logSymInput = document.getElementById('log-filter-symbol');
+    const logSigSelect = document.getElementById('log-filter-signal');
+    if (logSymInput) logSymInput.addEventListener('input', (e) => {
+      this.state.logFilterSymbol = e.target.value.toUpperCase();
+      this._renderLogPanel();
+    });
+    if (logSigSelect) logSigSelect.addEventListener('change', (e) => {
+      this.state.logFilterSignal = e.target.value === 'all' ? '' : e.target.value;
+      this._renderLogPanel();
+    });
 
     document.getElementById('btn-refresh').addEventListener('click', () => {
       if (!this.state.fetching) {
