@@ -1,5 +1,5 @@
 /**
- * 主应用 v3 — 适配动态币种池 + 大盘数据 + 主动资金
+ * 主应用 v2 — 视图模式、修正信号统计、数据有效性守卫
  */
 
 const App = {
@@ -22,8 +22,6 @@ const App = {
     useMock: new URLSearchParams(window.location.search).has('mock'),
     logFilterSymbol: '',
     logFilterSignal: '',
-    marketData: {},  // 新增：大盘数据
-    coinPool: [],    // 新增：动态币种池
   },
 
   async init() {
@@ -34,12 +32,6 @@ const App = {
     UI.init();
     this._bindEvents();
     window.__setFetchStatus = (msg) => UI.setFetchStatus(msg);
-
-    // 初始化数据服务（获取币种池）
-    if (!this.state.useMock) {
-      await this.dataService.init();
-      this.state.coinPool = this.dataService.getCoinPool();
-    }
 
     await this._tick();
     this.state.running = true;
@@ -58,31 +50,15 @@ const App = {
         : await this.dataService.fetchAll();
 
       this.state.allMetrics = [];
-      
-      // 获取大盘数据
-      if (!this.state.useMock && this.dataService.btcPrice) {
-        this.state.marketData = {
-          btcPrice: this.dataService.btcPrice,
-          ethPrice: this.dataService.ethPrice,
-          btc1hChange: this.dataService.btc1hChange || 0,
-          eth1hChange: this.dataService.eth1hChange || 0,
-        };
-      }
-
       for (const raw of rawAll) {
         if (!raw) continue;
-        
-        // 获取币种配置（用于判断是否 Alpha）
-        const coinCfg = (this.state.coinPool.length > 0)
-          ? this.state.coinPool.find(c => c.symbol === raw.symbol)
-          : { isPriority: false, tags: [] };
+        const coinCfg = COIN_POOL.find(c => c.symbol === raw.symbol);
+        if (!coinCfg) continue;
 
         const metrics = Calculator.compute(raw, coinCfg);
         const signals = SignalEngine.evaluate(metrics);
         metrics.signals = signals;
-        metrics.isAlpha = raw.isAlpha;
 
-        // 信号变化检测 → 记录日志
         const prevKeys = this.state.previousSignals[raw.symbol] || new Set();
         const newKeys = new Set(signals.map(s => s.key));
         for (const sig of signals) {
@@ -91,7 +67,6 @@ const App = {
           }
         }
         this.state.previousSignals[raw.symbol] = newKeys;
-        
         this.state.allMetrics.push(metrics);
       }
 
@@ -114,13 +89,9 @@ const App = {
       case 'active':
         rows = rows.filter(r => this._hasCoreSignal(r));
         break;
-      case 'alpha':
-        // 新增：只看 Alpha 币种
-        rows = rows.filter(r => r.isAlpha === true);
-        break;
       case 'priority':
         rows = rows.filter(r => {
-          const cfg = this.state.coinPool.find(c => c.symbol === r.symbol);
+          const cfg = COIN_POOL.find(c => c.symbol === r.symbol);
           return cfg?.isPriority;
         });
         break;
@@ -155,7 +126,6 @@ const App = {
         case 'change1h': return Math.abs(b.spot1hChange||0) - Math.abs(a.spot1hChange||0);
         case 'volume':   return (b.volumeRatio||0) - (a.volumeRatio||0);
         case 'oi':       return Math.abs(b.oiChange5m||0) - Math.abs(a.oiChange5m||0);
-        case 'funding':  return Math.abs(b.funding||0) - Math.abs(a.funding||0);
         case 'symbol':   return a.symbol.localeCompare(b.symbol);
         default:         return b.score - a.score;
       }
@@ -173,24 +143,16 @@ const App = {
       .filter(m => this._hasCoreSignal(m)).length;
     const dataWarnCount = this.state.allMetrics
       .filter(m => !m.validity || m.validity.completeness < 0.6).length;
-    const alphaCount = this.state.allMetrics.filter(m => m.isAlpha).length;
+    const priorityCoins = COIN_POOL.filter(c => c.isPriority).length;
     const loadedCoins = this.state.allMetrics.length;
-    const totalCoins = this.state.coinPool.length || loadedCoins;
-
-    // 大盘数据
-    const market = this.state.marketData || {};
 
     UI.renderStats({
-      totalCoins: `${loadedCoins}/${totalCoins}`,
-      alphaCoins: alphaCount,
+      totalCoins: loadedCoins + '/' + COIN_POOL.length,
       activeSignals: coreSignalCount,
+      priorityCoins,
       dataWarnCount,
       lastUpdate: this.state.lastFetchTime
         ? new Date(this.state.lastFetchTime).toLocaleTimeString() : '—',
-      btcPrice: market.btcPrice ? `$${market.btcPrice.toLocaleString()}` : '—',
-      btcChange: market.btc1hChange ? `${market.btc1hChange > 0 ? '+' : ''}${market.btc1hChange.toFixed(2)}%` : '—',
-      ethPrice: market.ethPrice ? `$${market.ethPrice.toLocaleString()}` : '—',
-      ethChange: market.eth1hChange ? `${market.eth1hChange > 0 ? '+' : ''}${market.eth1hChange.toFixed(2)}%` : '—',
     });
 
     UI.renderTable(this.state.filteredRows);
@@ -275,8 +237,8 @@ const App = {
 
   _openDetail(symbol) {
     const metrics = this.state.allMetrics.find(m => m.symbol === symbol);
-    const coinCfg = this.state.coinPool.find(c => c.symbol === symbol) || {};
-    if (!metrics) return;
+    const coinCfg = COIN_POOL.find(c => c.symbol === symbol);
+    if (!metrics || !coinCfg) return;
     const recentLogs = this.logger.getBySymbol(symbol, 20);
     UI.showDetail(symbol, metrics, metrics.signals || [], coinCfg, recentLogs);
   },
