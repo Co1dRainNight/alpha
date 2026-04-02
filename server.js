@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const PORT = 3001;
+const PORT = 80;
 const HOST = '0.0.0.0';
 
 const BINANCE_SPOT = 'https://api.binance.com';
@@ -88,14 +88,14 @@ async function handleApi(req, res, pathname, query) {
   } else if (pathname === '/api/funding') {
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/premiumIndex`;
   } else if (pathname === '/api/klines') {
-    const symbol = query.get('symbol') || 'BTCUSDT';
-    const limit = query.get('limit') || '13';
+    const symbol = (query && query.symbol) ? query.symbol : 'BTCUSDT';
+    const limit = (query && query.limit) ? query.limit : '13';
     targetUrl = `${BINANCE_SPOT}/api/v3/klines?symbol=${symbol}&interval=5m&limit=${limit}`;
   } else if (pathname === '/api/oi') {
-    const symbol = query.get('symbol') || 'BTCUSDT';
+    const symbol = (query && query.symbol) ? query.symbol : 'BTCUSDT';
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/openInterest?symbol=${symbol}`;
   } else if (pathname === '/api/globalLongShort') {
-    const symbol = query.get('symbol') || 'BTCUSDT';
+    const symbol = (query && query.symbol) ? query.symbol : 'BTCUSDT';
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/globalLongShortAccountRatio?symbol=${symbol}&period=5m&limit=5`;
   } else {
     res.writeHead(404);
