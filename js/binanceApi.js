@@ -5,12 +5,22 @@
  * 接口说明：
  *   现货  https://api.binance.com/api/v3/*
  *   合约  https://fapi.binance.com/fapi/v1/*
+ * 
+ * 数据获取模式：
+ *   USE_PROXY = true  → 通过本地代理 server.js 获取（解决 CORS）
+ *   USE_PROXY = false → 直连 Binance API（会被 CORS 拦截，仅开发测试用）
  */
+
+const USE_PROXY = true;  // 必须为 true 才能在浏览器中正常工作
+const PROXY_BASE = '';   // 如果 server.js 和页面同端口则留空，否则填如 'http://localhost:3001'
 
 class BinanceDataService {
   constructor() {
-    this.SPOT    = 'https://api.binance.com';
-    this.FUTURES = 'https://fapi.binance.com';
+    this.SPOT    = USE_PROXY ? `${PROXY_BASE}/api/spot` : 'https://api.binance.com';
+    this.FUTURES = USE_PROXY ? `${PROXY_BASE}/api/futures` : 'https://fapi.binance.com';
+    this.FUNDING = USE_PROXY ? `${PROXY_BASE}/api/funding` : 'https://fapi.binance.com';
+    this.KLINES  = USE_PROXY ? `${PROXY_BASE}/api/klines` : 'https://api.binance.com';
+    this.OI      = USE_PROXY ? `${PROXY_BASE}/api/oi` : 'https://fapi.binance.com';
 
     this._oiHistory  = {};  // symbol -> [{value, ts}]
     this._volHistory = {};  // symbol -> [quoteVolume]
@@ -28,9 +38,9 @@ class BinanceDataService {
 
     try {
       const [spotRes, futuresRes, fundingRes] = await Promise.allSettled([
-        this._get(`${this.SPOT}/api/v3/ticker/24hr`),
-        this._get(`${this.FUTURES}/fapi/v1/ticker/24hr`),
-        this._get(`${this.FUTURES}/fapi/v1/premiumIndex`),
+        this._get(`${this.SPOT}`),
+        this._get(`${this.FUTURES}`),
+        this._get(`${this.FUNDING}`),
       ]);
 
       spotMap    = this._index(this._val(spotRes));
@@ -79,13 +89,11 @@ class BinanceDataService {
       // 5m K 线 → 获取 5m / 1h 变化
       let price5mAgo = null, price1hAgo = null;
       const klinesSymbol = spotTk ? coin.alphaPair : (futuresTk ? coin.perpContract : null);
-      const klinesBase   = spotTk ? this.SPOT : this.FUTURES;
-      const klinesPath   = spotTk ? '/api/v3/klines' : '/fapi/v1/klines';
 
       if (klinesSymbol) {
         try {
           const kl = await this._get(
-            `${klinesBase}${klinesPath}?symbol=${klinesSymbol}&interval=5m&limit=13`
+            `${this.KLINES}?symbol=${klinesSymbol}&limit=13`
           );
           if (Array.isArray(kl) && kl.length >= 2) {
             price5mAgo = +kl[kl.length - 2][4];
@@ -101,7 +109,7 @@ class BinanceDataService {
       if (coin.hasPerp && perpPrice) {
         try {
           const oiRes = await this._get(
-            `${this.FUTURES}/fapi/v1/openInterest?symbol=${coin.perpContract}`
+            `${this.OI}?symbol=${coin.perpContract}`
           );
           if (oiRes && oiRes.openInterest) {
             oi = (+oiRes.openInterest) * perpPrice;
