@@ -1,24 +1,29 @@
 #!/usr/bin/env node
 /**
- * Alpha-Perp 看板后端代理
- * 解决浏览器直连 Binance API 的 CORS 问题
+ * Alpha-Perp 看板后端代理服务器
+ * 
+ * 同时提供：
+ * 1. 静态文件服务（HTML/CSS/JS）
+ * 2. Binance API 代理（解决 CORS）
  * 
  * 启动：node server.js
- * 端口：http://localhost:3001
+ * 访问：http://129.226.220.91:3001
  */
 
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const url = require('url');
 
 const PORT = 3001;
+const HOST = '0.0.0.0';
+
 const BINANCE_SPOT = 'https://api.binance.com';
 const BINANCE_FUTURES = 'https://fapi.binance.com';
 
-// MIME 类型
 const MIME_TYPES = {
-  '.html': 'text/html',
+  '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript',
   '.css': 'text/css',
   '.json': 'application/json',
@@ -27,24 +32,20 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-// 日志函数
-function log(req, res, status, url) {
-  const time = new Date().toISOString();
-  console.log(`[${time}] ${status} ${req.method} ${url}`);
+function log(status, method, pathname) {
+  const time = new Date().toLocaleTimeString();
+  console.log(`[${time}] ${status} ${method} ${pathname}`);
 }
 
-// 创建 HTTP 请求
-function proxyRequest(targetUrl, headers = {}) {
+function proxyRequest(targetUrl) {
   return new Promise((resolve, reject) => {
     const client = targetUrl.startsWith('https') ? https : http;
-    
     const options = {
       headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-        ...headers
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
       },
-      timeout: 10000
+      timeout: 15000
     };
     
     client.get(targetUrl, options, (res) => {
@@ -57,48 +58,48 @@ function proxyRequest(targetUrl, headers = {}) {
           resolve(data);
         }
       });
-    }).on('error', reject).on('timeout', () => reject(new Error('Request timeout')));
+    }).on('error', reject).on('timeout', () => reject(new Error('timeout')));
   });
 }
 
-// 处理静态文件
 function serveStatic(req, res, filePath) {
   fs.readFile(filePath, (err, data) => {
     if (err) {
-      res.writeHead(404);
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'text/plain' });
+    res.writeHead(200, {
+      'Content-Type': MIME_TYPES[ext] || 'text/plain',
+      'Cache-Control': 'no-cache'
+    });
     res.end(data);
   });
 }
 
-// 处理 API 代理请求
-async function handleProxy(req, res, path, query) {
-  // 解析 target URL
+async function handleApi(req, res, pathname, query) {
   let targetUrl;
   
-  if (path === '/api/spot') {
+  if (pathname === '/api/spot') {
     targetUrl = `${BINANCE_SPOT}/api/v3/ticker/24hr`;
-  } else if (path === '/api/futures') {
+  } else if (pathname === '/api/futures') {
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/ticker/24hr`;
-  } else if (path === '/api/funding') {
+  } else if (pathname === '/api/funding') {
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/premiumIndex`;
-  } else if (path === '/api/klines') {
+  } else if (pathname === '/api/klines') {
     const symbol = query.get('symbol') || 'BTCUSDT';
-    const limit = query.get('limit') || '12';
+    const limit = query.get('limit') || '13';
     targetUrl = `${BINANCE_SPOT}/api/v3/klines?symbol=${symbol}&interval=5m&limit=${limit}`;
-  } else if (path === '/api/oi') {
+  } else if (pathname === '/api/oi') {
     const symbol = query.get('symbol') || 'BTCUSDT';
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/openInterest?symbol=${symbol}`;
-  } else if (path === '/api/globalLongShort') {
+  } else if (pathname === '/api/globalLongShort') {
     const symbol = query.get('symbol') || 'BTCUSDT';
     targetUrl = `${BINANCE_FUTURES}/fapi/v1/globalLongShortAccountRatio?symbol=${symbol}&period=5m&limit=5`;
   } else {
     res.writeHead(404);
-    res.end('Unknown API endpoint');
+    res.end('API not found');
     return;
   }
   
@@ -109,18 +110,18 @@ async function handleProxy(req, res, path, query) {
       'Access-Control-Allow-Origin': '*'
     });
     res.end(JSON.stringify(data));
-    log(req, res, 200, path);
+    log(200, 'API', pathname);
   } catch (e) {
-    res.writeHead(500);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: e.message }));
-    log(req, res, 500, path);
+    log(500, 'API', pathname);
   }
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const pathname = url.pathname;
-  const query = url.searchParams;
+  const parsedUrl = url.parse(req.url, true);
+  const pathname = parsedUrl.pathname;
+  const query = parsedUrl.query;
 
   // CORS 预检
   if (req.method === 'OPTIONS') {
@@ -135,7 +136,7 @@ const server = http.createServer(async (req, res) => {
 
   // API 代理
   if (pathname.startsWith('/api/')) {
-    await handleProxy(req, res, pathname, query);
+    await handleApi(req, res, pathname, query);
     return;
   }
 
@@ -143,11 +144,20 @@ const server = http.createServer(async (req, res) => {
   let filePath = pathname === '/' ? '/index.html' : pathname;
   filePath = path.join(__dirname, filePath);
   
+  // 安全检查：防止目录遍历
+  if (!filePath.startsWith(__dirname)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+  
   serveStatic(req, res, filePath);
 });
 
-server.listen(PORT, () => {
-  console.log(`\n🚀 Alpha-Perp 看板代理服务器已启动`);
-  console.log(`   本地访问: http://localhost:${PORT}`);
-  console.log(`   按 Ctrl+C 停止\n`);
+server.listen(PORT, HOST, () => {
+  console.log('\n🚀 Alpha-Perp 看板服务器已启动');
+  console.log(`   访问地址: http://129.226.220.91:${PORT}`);
+  console.log(`   API 代理: http://129.226.220.91:${PORT}/api/*`);
+  console.log(`   静态文件: http://129.226.220.91:${PORT}/index.html`);
+  console.log('\n按 Ctrl+C 停止\n');
 });
